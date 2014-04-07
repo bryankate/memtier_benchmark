@@ -98,6 +98,7 @@ static void config_print(FILE *file, struct benchmark_config *cfg)
         "pipeline = %u\n"
         "data_size = %u\n"
         "random_data = %s\n"
+        "noop_get = %s\n"
         "data_size_range = %u-%u\n"
         "data_size_list = %s\n"
         "expiry_range = %u-%u\n"
@@ -109,6 +110,7 @@ static void config_print(FILE *file, struct benchmark_config *cfg)
         "key_minimum = %u\n"
         "key_maximum = %u\n"
         "key_pattern = %s\n"
+        "key_padding = %u\n"
         "reconnect_interval = %u\n"
         "multi_key_get = %u\n"
         "authenticate = %s\n"
@@ -130,6 +132,7 @@ static void config_print(FILE *file, struct benchmark_config *cfg)
         cfg->pipeline,
         cfg->data_size,
         cfg->random_data ? "yes" : "no",
+        cfg->noop_get ? "yes" : "no",
         cfg->data_size_range.min, cfg->data_size_range.max,
         cfg->data_size_list.print(tmpbuf, sizeof(tmpbuf)-1),
         cfg->expiry_range.min, cfg->expiry_range.max,
@@ -141,6 +144,7 @@ static void config_print(FILE *file, struct benchmark_config *cfg)
         cfg->key_minimum,
         cfg->key_maximum,
         cfg->key_pattern,
+        cfg->key_padding,
         cfg->reconnect_interval,
         cfg->multi_key_get,
         cfg->authenticate ? cfg->authenticate : "",
@@ -186,6 +190,7 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
         o_test_time = 128,
         o_ratio,
         o_pipeline,
+        o_noop_get,
         o_data_size_range,
         o_data_size_list,
         o_expiry_range,
@@ -196,6 +201,7 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
         o_key_minimum,
         o_key_maximum,
         o_key_pattern,
+        o_key_padding,
         o_show_config,
         o_client_stats,
         o_reconnect_interval,
@@ -223,6 +229,7 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
         { "pipeline",                   1, 0, o_pipeline },
         { "data-size",                  1, 0, 'd' },
         { "random-data",                0, 0, 'R' },
+        { "noop-get",                   0, 0, o_noop_get },
         { "data-size-range",            1, 0, o_data_size_range },
         { "data-size-list",             1, 0, o_data_size_list },
         { "expiry-range",               1, 0, o_expiry_range },
@@ -234,6 +241,7 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
         { "key-minimum",                1, 0, o_key_minimum },
         { "key-maximum",                1, 0, o_key_maximum },
         { "key-pattern",                1, 0, o_key_pattern },
+        { "key-padding",                1, 0, o_key_padding },
         { "reconnect-interval",         1, 0, o_reconnect_interval },
         { "multi-key-get",              1, 0, o_multi_key_get },
         { "authenticate",               1, 0, 'a' },
@@ -278,8 +286,9 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
                 case 'P':
                     if (strcmp(optarg, "memcache_text") &&
                         strcmp(optarg, "memcache_binary") &&
-                        strcmp(optarg, "redis")) {
-                                fprintf(stderr, "error: supported protocols are 'memcache_text', 'memcache_binary' and 'redis'.\n");
+                        strcmp(optarg, "redis") &&
+                        strcmp(optarg, "pequod")) {
+                                fprintf(stderr, "error: supported protocols are 'memcache_text', 'memcache_binary', 'redis', and 'pequod'.\n");
                                 return -1;
                     }
                     cfg->protocol = optarg;
@@ -370,6 +379,9 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
                 case 'R':
                     cfg->random_data = true;
                     break;
+                case o_noop_get:
+                    cfg->noop_get = true;
+                    break;
                 case o_data_size_range:
                     cfg->data_size_range = config_range(optarg);
                     if (!cfg->data_size_range.is_defined() || cfg->data_size_range.min < 1) {
@@ -429,6 +441,14 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
                             return -1;
                     }
                     break;
+                case o_key_padding:
+                    endptr = NULL;
+                    cfg->key_padding = (unsigned int) strtoul(optarg, &endptr, 10);
+                    if (cfg->key_padding< 1 || !endptr || *endptr != '\0') {
+                        fprintf(stderr, "error: key_padding must be greater than zero.\n");
+                        return -1;
+                    }
+                    break;
                 case o_reconnect_interval:
                     endptr = NULL;
                     cfg->reconnect_interval = (unsigned int) strtoul(optarg, &endptr, 10);
@@ -472,7 +492,7 @@ static int config_parse_args(int argc, char *argv[], struct benchmark_config *cf
 
 void usage() {
     fprintf(stderr, "Usage: memtier_benchmark [options]\n"
-            "A memcache/redis NoSQL traffic generator and performance benchmarking tool.\n"
+            "A memcache/redis/pequod NoSQL traffic generator and performance benchmarking tool.\n"
             "\n"
             "Connection and General Options:\n"
             "  -s, --server=ADDR              Server address (default: localhost)\n"
@@ -480,7 +500,7 @@ void usage() {
             "  -S, --unix-socket=SOCKET       UNIX Domain socket name (default: none)\n"
             "  -P, --protocol=PROTOCOL        Protocol to use (default: redis).  Other\n"
             "                                 supported protocols are memcache_text,\n"
-            "                                 memcache_binary.\n"
+            "                                 memcache_binary, pequod.\n"
             "  -x, --run-count=NUMBER         Number of full-test iterations to perform\n"
             "  -D, --debug                    Print debug output\n"
             "      --client-stats=FILE        Produce per-client stats file\n"
@@ -506,6 +526,7 @@ void usage() {
             "      --data-size-range=RANGE    Use random-sized items in the specified range (min-max)\n"
             "      --data-size-list=LIST      Use sizes from weight list (size1:weight1,..sizeN:weightN)\n"
             "      --expiry-range=RANGE       Use random expiry values from the specified range\n"
+            "      --noop-get                 Send noop-get requests (Pequod only)\n"
             "\n"
             "Imported Data Options:\n"
             "      --data-import=FILE         Read object data from file\n"
@@ -519,6 +540,7 @@ void usage() {
             "      --key-minimum=NUMBER       Key ID minimum value (default: 0)\n"
             "      --key-maximum=NUMBER       Key ID maximum value (default: 10000000)\n"
             "      --key-pattern=PATTERN      Set:Get pattern (default: R:R)\n"
+            "      --key-padding=NUMBER       Pad key ID values with zeros to be a fixed size (default: none)\n"
             "\n"
             "      --help                     Display this help\n"
             "      --version                  Display version information\n"
@@ -741,6 +763,11 @@ int main(int argc, char *argv[])
         }
     }
 
+    if (cfg.noop_get && strcmp(cfg.protocol, "pequod")) {
+        fprintf(stderr, "error: noop-get can only be used with pequod protocol.\n");
+        usage();
+    }
+
     // create and configure object generator
     object_generator* obj_gen = NULL;
     imported_keylist* keylist = NULL;
@@ -843,6 +870,7 @@ int main(int argc, char *argv[])
     if (!cfg.data_import || cfg.generate_keys) {
         obj_gen->set_key_prefix(cfg.key_prefix);
         obj_gen->set_key_range(cfg.key_minimum, cfg.key_maximum);
+        obj_gen->set_key_padding(cfg.key_padding);
     }
     obj_gen->set_expiry_range(cfg.expiry_range.min, cfg.expiry_range.max);
 
