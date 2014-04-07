@@ -53,6 +53,11 @@ void abstract_protocol::set_keep_value(bool flag)
     m_keep_value = flag;
 }
 
+void abstract_protocol::set_noop_get(bool flag)
+{
+    m_noop_get = flag;
+}
+
 /////////////////////////////////////////////////////////////////////////
 
 protocol_response::protocol_response()
@@ -333,6 +338,139 @@ int redis_protocol::parse_response(void)
                 break;
             default:
                 return -1;
+        }
+    }
+
+    return -1;
+}
+
+/////////////////////////////////////////////////////////////////////////
+
+#include "msgpack.hh"
+#include "str.hh"
+#include "string.hh"
+#include "straccum.hh"
+#include "pqrpc.hh"
+
+class pequod_protocol : public abstract_protocol {
+protected:
+    msgpack::streaming_parser parser_;
+    unsigned long seq_;
+public:
+    pequod_protocol() : seq_(0) { }
+    virtual pequod_protocol* clone(void) { return new pequod_protocol(); }
+    virtual int select_db(int db);
+    virtual int authenticate(const char *credentials);
+    virtual int write_command_set(const char *key, int key_len, const char *value, int value_len, int expiry);
+    virtual int write_command_get(const char *key, int key_len);
+    virtual int write_command_multi_get(const keylist *keylist);
+    virtual int parse_response(void);
+};
+
+int pequod_protocol::select_db(int db) {
+    assert(0);
+}
+
+int pequod_protocol::authenticate(const char *credentials) {
+    assert(0);
+}
+
+int pequod_protocol::write_command_set(const char *key, int key_len,
+                                       const char *value, int value_len,
+                                       int expiry) {
+    assert(key != NULL);
+    assert(key_len > 0);
+    assert(value != NULL);
+    assert(value_len > 0);
+
+    StringAccum sa;
+    msgpack::unparse(sa, Json::array(pq_insert, seq_++,
+                                     Str(key, key_len),
+                                     Str(value, value_len)));
+
+    evbuffer_add(m_write_buf, sa.data(), sa.length());
+    return sa.length();
+}
+
+int pequod_protocol::write_command_get(const char *key, int key_len) {
+
+    assert(key != NULL);
+    assert(key_len > 0);
+
+    StringAccum sa;
+    msgpack::unparse(sa, Json::array((m_noop_get) ? pq_noop_get : pq_get,
+                                     seq_++, Str(key, key_len)));
+
+    evbuffer_add(m_write_buf, sa.data(), sa.length());
+    return sa.length();
+}
+
+int pequod_protocol::write_command_multi_get(const keylist *keylist) {
+    fprintf(stderr, "error: multi get not implemented for pequod yet!\n");
+    assert(0);
+}
+
+int pequod_protocol::parse_response(void) {
+
+    int ret;
+    struct evbuffer_iovec rdbuf;
+
+    while(true) {
+        ret = evbuffer_get_length(m_read_buf);
+
+        if (!ret)
+            return 0;
+
+        ret = evbuffer_peek(m_read_buf, ret, NULL, &rdbuf, 1);
+        assert(ret >= 1);
+
+        ret = parser_.consume((const char*)rdbuf.iov_base, rdbuf.iov_len);
+        assert(ret > 0);
+
+        ret = evbuffer_drain(m_read_buf, ret);
+        assert(!ret);
+
+        if (parser_.done()) {
+            if (!parser_.success()) {
+                benchmark_debug_log("rpc parsing failure!\n");
+                return -1;
+            }
+
+            const Json& j = parser_.result();
+            assert(j.is_a());
+
+            parser_.reset();
+            m_last_response.clear();
+
+            if (j[2].as_i() == pq_fail) {
+                m_last_response.set_error(true);
+                benchmark_debug_log("rpc fail!\n");
+                return -1;
+            }
+
+            switch(j[0].as_i()) {
+                case -pq_insert:
+                    break;
+
+                case -pq_get:
+                case -pq_noop_get: {
+                    int vlen = j[3].to_s().length();
+                    char* val = (char*)malloc(vlen);
+
+                    memcpy(val, j[3].to_s().data(), vlen);
+                    m_last_response.set_value(val, vlen);
+
+                    if (vlen)
+                        m_last_response.incr_hits();
+                    break;
+                }
+
+                default:
+                    benchmark_debug_log("unexpected rpc return: %d\n", j[0].as_i());
+                    return -1;
+            }
+
+            return 1;
         }
     }
 
@@ -775,6 +913,8 @@ class abstract_protocol *protocol_factory(const char *proto_name)
         return new memcache_text_protocol();
     } else if (strcmp(proto_name, "memcache_binary") == 0) {
         return new memcache_binary_protocol();
+    } else if (strcmp(proto_name, "pequod") == 0) {
+        return new pequod_protocol();
     } else {
         benchmark_error_log("Error: unknown protocol '%s'.\n", proto_name);
         return NULL;

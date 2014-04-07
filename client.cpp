@@ -129,6 +129,7 @@ bool client::setup_client(benchmark_config *config, abstract_protocol *protocol,
     m_protocol = protocol->clone();
     assert(m_protocol != NULL);
     m_protocol->set_buffers(m_read_buf, m_write_buf);
+    m_protocol->set_noop_get(m_config->noop_get);
 
     m_obj_gen = objgen->clone();
     assert(m_obj_gen != NULL);
@@ -1070,6 +1071,10 @@ void run_stats::update_get_op(struct timeval* ts, unsigned int bytes, unsigned i
     if (msec_latency > MAX_LATENCY_HISTOGRAM)
         msec_latency = MAX_LATENCY_HISTOGRAM;
     m_get_latency[msec_latency]++;    
+
+#if RECORD_FULL_LATENCY
+    m_latency_log.push_back(std::make_pair(0, msec_latency));
+#endif
 }
 
 void run_stats::update_set_op(struct timeval* ts, unsigned int bytes, unsigned int latency)
@@ -1088,6 +1093,10 @@ void run_stats::update_set_op(struct timeval* ts, unsigned int bytes, unsigned i
     if (msec_latency > MAX_LATENCY_HISTOGRAM)
         msec_latency = MAX_LATENCY_HISTOGRAM;
     m_set_latency[msec_latency]++;
+
+#if RECORD_FULL_LATENCY
+    m_latency_log.push_back(std::make_pair(1, msec_latency));
+#endif
 }
 
 unsigned int run_stats::get_duration(void)
@@ -1177,6 +1186,14 @@ bool run_stats::save_csv(const char *filename)
             fprintf(f, "%u,%.2f\n", i, (double) total_count / total_set_ops * 100);
         }
     }
+
+#if RECORD_FULL_LATENCY
+    fprintf(f, "\n" "Full-Test Latency (msec) Log\n");
+
+    for (unsigned int i = 0; i < m_latency_log.size(); ++i) {
+        fprintf(f, "%s %u\n", (m_latency_log[i].first) ? "SET" : "GET", m_latency_log[i].second);
+    }
+#endif
 
     fclose(f);
     return true;
